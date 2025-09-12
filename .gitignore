@@ -1,0 +1,90 @@
+# -------------------------------------------------------
+# MODULO 1 : PYTHON BASICO - caches/bytecode
+# Limpia artefactos de compilación y cachés.
+# -------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# -------------------------------------------------------
+# MODULO 2 : ENTORNOS VIRTUALES - venvs
+# Evita subir entornos y archivos de entorno.
+# -------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+*.env
+.env.*
+pip-wheel-metadata/
+
+# -------------------------------------------------------
+# MODULO 3 : HERRAMIENTAS/IDE - tooling
+# Configs locales y cachés de herramientas.
+# -------------------------------------------------------
+.vscode/
+.idea/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# -------------------------------------------------------
+# MODULO 4 : BUILD/DIST - empaquetado
+# Artefactos de distribución.
+# -------------------------------------------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# -------------------------------------------------------
+# MODULO 5 : LOGS/TEMP - temporales
+# Archivos temporales y logs.
+# -------------------------------------------------------
+*.log
+*.tmp
+tmp/
+*.swap
+
+# -------------------------------------------------------
+# MODULO 6 : SO/EDITOR - sistema operativo
+# Basura del OS/editores.
+# -------------------------------------------------------
+.DS_Store
+Thumbs.db
+
+# -------------------------------------------------------
+# MODULO 7 : EXCEL - excluir SIEMPRE
+# No subir archivos Excel ni temporales de Office.
+# -------------------------------------------------------
+*.xlsx
+*.xls
+*.xlsm
+*.xlsb
+~$*
+
+# -------------------------------------------------------
+# MODULO 8 : KEYS/SECRETS - seguridad
+# Llaves y certificados sensibles.
+# -------------------------------------------------------
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+*.der
+*.jks
+
+# -------------------------------------------------------
+# MODULO 9 : OPCIONALES - descomentá si aplica
+# (Deja comentado si quieres versionar estos tipos)
+# -------------------------------------------------------
+# *.csv        # datos tabulares
+# *.json       # exportaciones JSON
+# *.ipynb      # notebooks
+# .ipynb_checkpoints/
