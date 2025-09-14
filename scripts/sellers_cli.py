@@ -129,12 +129,29 @@ def export_missing_report(base_path: Path, missing_rows: List[Dict[str,Any]]) ->
 # - (Opcional) POST /v1/sellers/ si tenant lo permite
 # -------------------------------------------------------
 
+# (1) NUEVO: ping de autenticación robusto
+def ping_auth(sess: requests.Session, cfg: SRConfig) -> int:
+    base = ensure_base_url(cfg.base_url)
+    for ep in ("accounts/me/", "users/me/"):
+        r = sess.get(base + ep, timeout=cfg.timeout)
+        print(f"[AUTH] probe {ep} -> {r.status_code}")
+        if r.status_code == 200:
+            return 200
+    return r.status_code  # último status
+
+# (2) MOD: api_list_sellers intenta rutas alternativas
 def api_list_sellers(sess: requests.Session, cfg: SRConfig) -> List[Dict[str,Any]]:
-    url = ensure_base_url(cfg.base_url) + "sellers/"
-    r = sess.get(url, timeout=cfg.timeout)
-    if r.status_code != 200:
-        raise RuntimeError(f"Error listando sellers: {r.status_code} {r.text}")
-    return r.json()
+    base = ensure_base_url(cfg.base_url)
+    tried = []
+    for ep in ("sellers/", "datamart/sellers/"):
+        url = base + ep
+        r = sess.get(url, timeout=cfg.timeout)
+        if r.status_code == 200:
+            return r.json()
+        tried.append(f"{ep} -> {r.status_code} {r.text[:120]}")
+    raise RuntimeError("No pude listar sellers. Intentos: " + " | ".join(tried) +
+                       "  (Puede que el módulo ‘Sellers/Datamart’ no esté habilitado en tu cuenta)")
+
 
 def api_create_seller(sess: requests.Session, cfg: SRConfig, name: str, alias: str, language: str="es") -> Dict[str,Any]:
     if not cfg.enable_create:
@@ -185,13 +202,15 @@ def cmd_template(args):
         df.to_excel(wr, index=False, sheet_name="sellers")
     print(f"[TEMPLATE] creado: {path}")
 
+# (3) MOD: build_cfg_from_args loguea base_url y Excel
 def build_cfg_from_args(args) -> SRConfig:
     load_env()
     token = args.token or os.environ.get("SIMPLIROUTE_TOKEN") or ""
     if not token:
         token = input(">> Ingresa tu Token de SimpliRoute: ").strip()
-    base_url = args.base_url or os.environ.get("SIMPLIROUTE_BASE_URL","https://api.simpliroute.com")
+    base_url = args.base_url or os.environ.get("SIMPLIROUTE_BASE_URL","https://api.internal-simpliroute.com")
     excel_path = path_resolver(args.excel, DEFAULT_CONFIG_XLSX)
+    print(f"[CFG] base_url={base_url}")
     print(f"[CFG] Excel: {excel_path}")
     return SRConfig(base_url=base_url, token=token, excel_path=excel_path, enable_create=args.enable_create)
 
@@ -203,11 +222,11 @@ def cmd_validate(args):
 def cmd_sync(args):
     cfg = build_cfg_from_args(args)
     sess = make_session(cfg)
-    # ping auth
-    me = sess.get(ensure_base_url(cfg.base_url) + "users/me/", timeout=cfg.timeout)
-    print(f"[AUTH] status={me.status_code}")
+    auth_status = ping_auth(sess, cfg)
+    if auth_status != 200:
+        print("[AUTH] No pasó el ping de autenticación. Revisa SIMPLIROUTE_BASE_URL y el token en .env")
+        return
     df = read_excel(cfg.excel_path)
-
     sellers_api = api_list_sellers(sess, cfg)
     by_name, by_alias = match_existing(sellers_api)
 
@@ -267,7 +286,7 @@ def cmd_create_missing(args):
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="CLI de Sellers (SimpliRoute)")
-    p.add_argument("--base-url", help="Base URL de la API (default: https://api.simpliroute.com)", default=None)
+    p.add_argument("--base-url", help="Base URL de la API (default: https://api.internal-simpliroute.com)", default=None)
     p.add_argument("--token", help="Token SR (si no, usa SIMPLIROUTE_TOKEN del .env en raíz)", default=None)
     p.add_argument("--excel", help="Ruta Excel (default: raiz/config_sellers.xlsx)", default=None)
     p.add_argument("--enable-create", action="store_true", help="Habilita POST /v1/sellers/ si tu tenant lo soporta")
