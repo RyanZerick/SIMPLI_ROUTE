@@ -142,6 +142,13 @@ def _put_list(sess: requests.Session, url: str, rows: List[Dict[str, Any]], time
 def _put_dict(sess: requests.Session, url: str, row: Dict[str, Any], timeout: int):
     return sess.put(url, data=json.dumps(row), timeout=timeout)
 
+# PATCH helpers (igual que _put_list/_put_dict)
+def _patch_list(sess: requests.Session, url: str, rows: List[Dict[str, Any]], timeout: int):
+    return sess.patch(url, data=json.dumps(rows), timeout=timeout)
+
+def _patch_dict(sess: requests.Session, url: str, row: Dict[str, Any], timeout: int):
+    return sess.patch(url, data=json.dumps(row), timeout=timeout)
+
 def _json_or_text(r: requests.Response):
     try:
         return r.json()
@@ -161,22 +168,57 @@ def api_create_drivers(sess: requests.Session, cfg: SRConfig, rows: List[Dict[st
         raise RuntimeError(f"Create drivers error red: {e}")
 
 def api_create_driver_fallback(sess: requests.Session, cfg: SRConfig, row: Dict[str, Any]) -> Tuple[int, Any, str]:
-    """Fallback robusto: intenta LISTA -> si ve 'Expected a dictionary', reintenta OBJETO."""
+    """
+    Intenta crear driver con fallback y tolerancia a timeouts:
+    1) POST LISTA [row]
+       - si 400 con 'Expected a dictionary' -> POST DICT {row}
+    2) Si hay ReadTimeout en cualquiera, reintenta UNA vez con timeout aumentado (min(120, cfg.timeout*2)).
+    """
     base = ensure_base_url(cfg.base_url)
     url = base + "accounts/drivers/"
+
+    def _do_list(to):
+        return _post_list(sess, url, [row], to)
+
+    def _do_dict(to):
+        return _post_dict(sess, url, row, to)
+
+    # intento 1: LISTA
     try:
-        r = _post_list(sess, url, [row], cfg.timeout)
+        r = _do_list(cfg.timeout)
         payload = _json_or_text(r)
-        # si falla por "Expected a dictionary", reintenta con objeto
-        if r.status_code == 400 and isinstance(payload, (dict,)) and any(
-            "Expected a dictionary" in str(v) for v in payload.values()
-        ):
-            r2 = _post_dict(sess, url, row, cfg.timeout)
-            payload2 = _json_or_text(r2)
-            return (r2.status_code, payload2, r2.text)
+        # si el backend quiere DICT
+        if r.status_code == 400 and isinstance(payload, dict) and any("Expected a dictionary" in str(v) for v in payload.values()):
+            # intento 2: DICT
+            try:
+                r2 = _do_dict(cfg.timeout)
+                payload2 = _json_or_text(r2)
+                return (r2.status_code, payload2, r2.text)
+            except requests.exceptions.ReadTimeout:
+                # reintento DICT con más timeout
+                to2 = min(120, cfg.timeout * 2)
+                r3 = _do_dict(to2)
+                payload3 = _json_or_text(r3)
+                return (r3.status_code, payload3, r3.text)
         return (r.status_code, payload, r.text)
+
+    except requests.exceptions.ReadTimeout:
+        # Reintento LISTA con más timeout
+        to2 = min(120, cfg.timeout * 2)
+        try:
+            r4 = _do_list(to2)
+            payload4 = _json_or_text(r4)
+            # si ahora dice 'Expected a dictionary', probamos DICT con timeout largo
+            if r4.status_code == 400 and isinstance(payload4, dict) and any("Expected a dictionary" in str(v) for v in payload4.values()):
+                r5 = _do_dict(to2)
+                payload5 = _json_or_text(r5)
+                return (r5.status_code, payload5, r5.text)
+            return (r4.status_code, payload4, r4.text)
+        except requests.exceptions.ReadTimeout as e2:
+            return (0, {}, f"ReadTimeout tras reintento: {e2}")
     except requests.RequestException as e:
         raise RuntimeError(f"Create driver (fallback) error red: {e}")
+
 
 def api_update_driver(sess: requests.Session, cfg: SRConfig, user_id: int, row: Dict[str, Any]) -> Tuple[int, Any, str]:
     """PUT con fallback: intenta LISTA -> si ve 'Expected a dictionary', reintenta OBJETO."""
@@ -205,6 +247,37 @@ def api_delete_driver(sess: requests.Session, cfg: SRConfig, user_id: int) -> in
         print(f"[DELETE] error de red: {e}")
         return 0
 
+def api_get_driver(sess: requests.Session, cfg: SRConfig, user_id: int) -> Tuple[int, Any]:
+    base = ensure_base_url(cfg.base_url)
+    url = base + f"accounts/drivers/{user_id}/"
+    try:
+        r = sess.get(url, timeout=cfg.timeout)
+        try:
+            payload = r.json()
+        except Exception:
+            payload = r.text
+        return (r.status_code, payload)
+    except requests.RequestException as e:
+        return (0, f"GET error: {e}")
+
+def api_patch_driver_fallback(sess: requests.Session, cfg: SRConfig, user_id: int, row: Dict[str, Any]) -> Tuple[int, Any, str]:
+    """
+    PATCH con fallback: intenta LISTA -> si ve 'Expected a dictionary', reintenta OBJETO.
+    """
+    base = ensure_base_url(cfg.base_url)
+    url = base + f"accounts/drivers/{user_id}/"
+    try:
+        r = _patch_list(sess, url, [row], cfg.timeout)
+        payload = _json_or_text(r)
+        if r.status_code == 400 and isinstance(payload, dict) and any("Expected a dictionary" in str(v) for v in payload.values()):
+            r2 = _patch_dict(sess, url, row, cfg.timeout)
+            payload2 = _json_or_text(r2)
+            return (r2.status_code, payload2, r2.text)
+        return (r.status_code, payload, r.text)
+    except requests.RequestException as e:
+        return (0, {}, f"PATCH error: {e}")
+
+
 # -------------------------------------------------------
 # MODULO 3.5 : Helpers faltantes
 # Objetivo - funciones
@@ -231,25 +304,79 @@ def _safe_id_from_payload(payload):
         pass
     return None
 
-def soft_deactivate_driver(sess: requests.Session, cfg: SRConfig, user_id: int) -> int:
+def soft_deactivate_driver(sess: requests.Session, cfg: SRConfig, user_id: int) -> Tuple[int, Any]:
     """
-    Observaciones:
-    1) Algunos tenants devuelven 405 en DELETE.
-    2) Este helper hace un PUT /accounts/drivers/{id}/ con blocked=True y status='inactive'.
-    3) Usa fallback: primero lista [row], si el backend espera objeto -> reintenta con dict.
+    Intenta desactivar/bloquear al driver con varios intentos:
+    - Trae el objeto actual para heredar flags.
+    - PUT y luego PATCH con payloads incrementales:
+      a) {'is_driver': True, 'blocked': True, 'status': 'inactive'}
+      b) + {'user_type': 'driver'} si el backend lo pide
+      c) variantes sólo 'blocked' o sólo 'status' por compatibilidad
+    Retorna (status_code_final, detalle_json/texto).
     """
-    base = ensure_base_url(cfg.base_url)
-    url = base + f"accounts/drivers/{user_id}/"
-    row = {"blocked": True, "status": "inactive"}
+    # 1) Prefetch
+    st, current = api_get_driver(sess, cfg, user_id)
+    if st != 200 or not isinstance(current, dict):
+        # seguimos, pero partimos de payload mínimo
+        current = {}
 
-    # (1) Intento como LISTA
-    r = _put_list(sess, url, [row], cfg.timeout)
-    if r.status_code in (200, 201):
-        return r.status_code
+    # Base flags (conservamos banderas si existen)
+    base_body = {
+        "username": current.get("username", ""),
+        "name": current.get("name", ""),
+        "phone": current.get("phone", ""),
+        "email": current.get("email", ""),
+        # MUY IMPORTANTE para este tenant:
+        "is_driver": True,  # fuerza tipo de usuario
+        # preserva flags si están
+        "is_admin": bool(current.get("is_admin", False)),
+        "is_router": bool(current.get("is_router", False)),
+        "is_monitor": bool(current.get("is_monitor", False)),
+        "is_seller": bool(current.get("is_seller", False)),
+        "is_seller_viewer": bool(current.get("is_seller_viewer", False)),
+    }
 
-    # (2) Si el backend esperaba objeto, intentamos como DICT
-    r2 = _put_dict(sess, url, row, cfg.timeout)
-    return r2.status_code
+    # Intentos ordenados (PUT primero, luego PATCH), con variantes
+    attempts = [
+        # completo con status y blocked
+        {"method": "PUT",   "body": dict(base_body, blocked=True, status="inactive")},
+        {"method": "PATCH", "body": dict(base_body, blocked=True, status="inactive")},
+        # si pide user_type
+        {"method": "PUT",   "body": dict(base_body, blocked=True, status="inactive", user_type="driver")},
+        {"method": "PATCH", "body": dict(base_body, blocked=True, status="inactive", user_type="driver")},
+        # sólo blocked
+        {"method": "PUT",   "body": dict(base_body, blocked=True)},
+        {"method": "PATCH", "body": dict(base_body, blocked=True)},
+        # sólo status
+        {"method": "PUT",   "body": dict(base_body, status="inactive")},
+        {"method": "PATCH", "body": dict(base_body, status="inactive")},
+    ]
+
+    for att in attempts:
+        if att["method"] == "PUT":
+            stp, payload, raw = api_update_driver(sess, cfg, user_id, att["body"])
+        else:
+            stp, payload, raw = api_patch_driver_fallback(sess, cfg, user_id, att["body"])
+
+        # éxito común
+        if stp in (200, 202):
+            return (stp, payload)
+
+        # si devuelve explícitamente que falta tipo de usuario, pasamos a la variante con user_type
+        text = raw if isinstance(raw, str) else str(raw)
+        if "must select user type" in text.lower():
+            continue  # el siguiente intento ya lo incluye
+
+        # algunos tenants responden 400 pero aplican cambios; intentamos GET para verificar estado
+        if stp == 400:
+            gst, gobj = api_get_driver(sess, cfg, user_id)
+            if gst == 200 and isinstance(gobj, dict):
+                if gobj.get("blocked") is True or str(gobj.get("status","")).lower() == "inactive":
+                    return (200, gobj)
+
+    # último intento: ver estado final por GET y devolverlo
+    gst, gobj = api_get_driver(sess, cfg, user_id)
+    return (gst, gobj)
 
 
 
@@ -638,13 +765,27 @@ def build_cfg_from_args(args) -> SRConfig:
     token = args.token or os.environ.get("SIMPLIROUTE_TOKEN") or ""
     if not token:
         token = input(">> Ingresa tu Token de SimpliRoute: ").strip()
+
     base_url = args.base_url or os.environ.get("SIMPLIROUTE_BASE_URL","https://api.simpliroute.com")
+
+    # NEW: timeout configurable
+    env_timeout = os.environ.get("SIMPLIROUTE_TIMEOUT", "").strip()
+    cfg_timeout = int(env_timeout) if env_timeout.isdigit() else 30
+    if getattr(args, "timeout", None):
+        cfg_timeout = int(args.timeout)
+
     web_path    = path_resolver(args.web_excel, DEFAULT_WEB_XLSX)
     mobile_path = path_resolver(args.mobile_excel, DEFAULT_MOBILE_XLSX)
     print(f"[CFG] base_url={base_url}")
     print(f"[CFG] WEB   : {web_path}")
     print(f"[CFG] MOBILE: {mobile_path}")
-    return SRConfig(base_url=base_url, token=token, web_path=web_path, mobile_path=mobile_path, try_web_api=not args.no_try_web)
+    print(f"[CFG] timeout={cfg_timeout}s")
+
+    return SRConfig(
+        base_url=base_url, token=token,
+        web_path=web_path, mobile_path=mobile_path,
+        timeout=cfg_timeout, try_web_api=not args.no_try_web
+    )
 
 def cmd_validate(args):
     cfg = build_cfg_from_args(args)
@@ -734,7 +875,7 @@ def cmd_test(args):
     user_id = _safe_id_from_payload(payload)
     print(f"[TEST] OK -> status={status} username={uname} id={user_id}")
 
-    # Limpieza salvo --keep-test-users
+    # limpieza salvo --keep-test-users
     keep = getattr(args, "keep_test_users", False)
     if not user_id or keep:
         return
@@ -743,8 +884,10 @@ def cmd_test(args):
     if del_status in (200, 204):
         print(f"[TEST][CLEANUP] DELETE /accounts/drivers/{user_id}/ -> {del_status}")
     else:
-        deact_status = soft_deactivate_driver(sess, cfg, user_id)
+        deact_status, deact_detail = soft_deactivate_driver(sess, cfg, user_id)
         print(f"[TEST][CLEANUP] DEACTIVATE /accounts/drivers/{user_id}/ -> {deact_status}")
+        if deact_status >= 400:
+            print(f"[TEST][CLEANUP][DETAIL] {str(deact_detail)[:300]}")
 
 # -------------------------------------------------------
 # MODULO 8 : Parser CLI (pensado para futura GUI)
@@ -760,6 +903,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mode", choices=["both","web","mobile"], help="Qué sincronizar (default: both)", default="both")
     p.add_argument("--no-try-web", action="store_true", help="No intentar crear web users por API (solo validar/reportar)")
     p.add_argument("--keep-test-users", action="store_true", help="No elimina el usuario de prueba creado en 'test'")
+    p.add_argument("--timeout", type=int, default=None, help="Timeout en segundos para requests (default: 30, o SIMPLIROUTE_TIMEOUT)")
 
     sp = p.add_subparsers(dest="cmd", required=True)
     sp_t = sp.add_parser("template", help="Generar templates mínimos en raíz")
